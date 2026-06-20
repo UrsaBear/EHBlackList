@@ -1,0 +1,12 @@
+services:
+  eh-blacklist:
+    build: .
+    container_name: eh-blacklist
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      - ADDR=:8787
+      - DB_PATH=/data/blacklist.db
+    restart: unless-stopped

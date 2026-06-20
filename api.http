@@ -1,0 +1,47 @@
+### Health
+GET http://127.0.0.1:8787/health
+
+### Stats
+GET http://127.0.0.1:8787/stats
+
+### List reasons
+GET http://127.0.0.1:8787/reasons
+
+### Create ID blacklist entry
+POST http://127.0.0.1:8787/entries
+Content-Type: application/json
+
+{
+  "type": "id",
+  "value": "123456",
+  "reason_code": "artist",
+  "reason_label": "不喜欢作者",
+  "priority": 100
+}
+
+### Create keyword blacklist entry
+POST http://127.0.0.1:8787/entries
+Content-Type: application/json
+
+{
+  "type": "keyword",
+  "value": "测试关键词",
+  "reason_code": "content",
+  "reason_label": "题材避雷",
+  "priority": 100
+}
+
+### Check batch
+POST http://127.0.0.1:8787/check
+Content-Type: application/json
+
+{
+  "items": [
+    {"gid": "123456", "title": "任意标题"},
+    {"gid": "999999", "title": "这是一个测试关键词标题"},
+    {"gid": "888888", "title": "没有命中的标题"}
+  ]
+}
+
+### Export
+GET http://127.0.0.1:8787/export

@@ -1,0 +1,6 @@
+.idea/
+*.db
+*.db-shm
+*.db-wal
+data/*.db*
+eh-blacklist-server
