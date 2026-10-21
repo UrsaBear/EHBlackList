@@ -97,6 +97,7 @@
     let currentPage = 1;
     let currentSearchTerm = '';
     let activeTab = 'kw'; // 'kw' / 'id' / 'reason'
+    let pageInitialized = false;
 
     let overlayEl;
     let panelTableBody;
@@ -397,7 +398,7 @@
         }
 
         hideConfigBanner();
-        if (!wasConfigured) {
+        if (!wasConfigured && !pageInitialized) {
             init();
         } else {
             refreshCurrentPageMatches();
@@ -1812,6 +1813,7 @@
             return;
         }
         hideConfigBanner();
+        pageInitialized = true;
         const hasList = document.querySelector('.itg .gl1t');
         if (hasList) handleListPage();
         else handleDetailPage();
