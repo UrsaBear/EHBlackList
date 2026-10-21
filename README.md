@@ -290,7 +290,21 @@ curl -X PUT -H "Authorization: Bearer $API_TOKEN" \
    `O(标题长度 + 命中数)`，不再随关键词总数线性增长。
 6. 单条标题最多处理 4096 个字符，避免异常输入放大 CPU 开销。
 
+## 配套 Userscript
+
+仓库根目录的 [`eh-blacklist.user.js`](eh-blacklist.user.js) 是配套脚本，适用于
+Tampermonkey / Violentmonkey。
+
+- 后端地址默认留空；首次使用时页面左下角会显示“未配置黑名单后端”，点击即可设置，
+  不会向后端发起查询。
+- 如果服务端设置了 `API_TOKEN`，在同一个设置窗口填写 Token；地址和 Token 保存在
+  userscript 管理器的 GM 存储中，不会写进脚本源码。
+- 地址支持 `http://` / `https://`，可带路径前缀，例如 `http://127.0.0.1:8787`。
+- 管理面板里的“设置”可随时修改地址/Token，并提供“测试连接”按钮。
+
 ## Userscript 调用建议
+
+以下是最小调用示例；完整逻辑见上面的配套脚本。
 
 列表页一次性收集作品：
 
