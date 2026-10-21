@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ExHentai / EH 黑名单管理 API版
 // @namespace    https://exhentai.org/
-// @version      3.5.0-api-settings
-// @description  服务端黑名单: 通过本地 Go API 查询/管理 ID + 关键词黑名单，支持可配置后端地址/Token、原因反显、原因下拉选择、三态过滤、LRR 共存、管理面板、导入导出。
+// @version      3.6.0-api-settings
+// @description  服务端黑名单: 通过本地 Go API 查询/管理 ID + 关键词黑名单，支持可配置后端地址/Token、搜索缓存、批量分片、原因反显、三态过滤、LRR 共存、管理面板、导入导出。
 // @author       You
 // @match        https://exhentai.org/*
 // @match        https://e-hentai.org/*
@@ -93,11 +93,18 @@
 
     const PAGE_SIZE = 20;
     const API_LIST_LIMIT = 5000;
+    const CHECK_CHUNK_SIZE = 500; // 服务端 MAX_CHECK_ITEMS 默认 1000
 
     let currentPage = 1;
     let currentSearchTerm = '';
     let activeTab = 'kw'; // 'kw' / 'id' / 'reason'
     let pageInitialized = false;
+    const tableCache = { kw: null, id: null, reason: null };
+    const tableCacheTruncated = { kw: false, id: false };
+    let tableRenderSeq = 0;
+    let listRefreshSeq = 0;
+    let detailRefreshSeq = 0;
+    let searchTimer = null;
 
     let overlayEl;
     let panelTableBody;
@@ -122,7 +129,8 @@
         return apiBaseUrl + path;
     }
 
-    function apiRequest(method, path, body) {
+    function apiRequest(method, path, body, requestOptions) {
+        const opts = requestOptions || {};
         return new Promise((resolve, reject) => {
             if (!apiBaseUrl) {
                 const err = new Error('未配置后端地址，请先在“设置”中填写');
@@ -137,7 +145,7 @@
                 method,
                 url: apiUrl(path),
                 headers,
-                timeout: 30000,
+                timeout: opts.timeout || 30000,
                 onload: response => {
                     const text = response.responseText || '';
                     let data = null;
@@ -192,6 +200,9 @@
     async function createReasonIfNeeded(label) {
         const clean = String(label || '').trim();
         if (!clean) return null;
+        const reasons = await getReasons(false);
+        const existing = reasons.find(r => String(r.label || '').trim() === clean);
+        if (existing) return existing;
         const data = await apiRequest('POST', '/reasons', {
             label: clean,
             sort_order: 100
@@ -206,13 +217,24 @@
     }
 
     async function deleteEntry(type, valueNorm) {
-        return apiRequest('DELETE', '/entries' + encodeQuery({ type, value_norm: valueNorm }));
+        try {
+            return await apiRequest('DELETE', '/entries' + encodeQuery({ type, value_norm: valueNorm }));
+        } catch (e) {
+            // 删除是幂等操作：并发删除或旧值已不存在时按成功处理。
+            if (e && e.status === 404) return { deleted: true };
+            throw e;
+        }
     }
 
     async function checkItems(items) {
         if (!items.length) return [];
-        const data = await apiRequest('POST', '/check', { items });
-        return (data && data.items) || [];
+        const results = [];
+        for (let i = 0; i < items.length; i += CHECK_CHUNK_SIZE) {
+            const chunk = items.slice(i, i + CHECK_CHUNK_SIZE);
+            const data = await apiRequest('POST', '/check', { items: chunk });
+            results.push(...((data && data.items) || []));
+        }
+        return results;
     }
 
     function showApiError(err, prefix) {
@@ -222,6 +244,8 @@
             message = '未授权：请打开“设置”填写正确的 API Token';
         } else if (err && err.code === 'NO_CONFIG') {
             message = '未配置后端地址：请打开“设置”填写后端地址';
+        } else if (err && err.status === 413) {
+            message = '请求体过大：请减少导入数据，或调高服务端 MAX_BODY_BYTES';
         }
         alert((prefix || 'API 错误') + ': ' + message);
     }
@@ -388,6 +412,7 @@
         apiBaseUrl = nextBase;
         apiToken = nextToken;
         cachedReasons = null;
+        invalidateTableCache();
 
         close();
 
@@ -403,7 +428,7 @@
         } else {
             refreshCurrentPageMatches();
             if (overlayEl && overlayEl.style.display !== 'none') {
-                renderTable();
+                renderTable(true);
             }
         }
 
@@ -583,11 +608,15 @@
         const rows = document.querySelectorAll('.ehbl-row-all');
 
         rows.forEach(row => {
-            const isBlacklisted = row.dataset.ehblBlacklisted === '1';
+            const blacklistedState = row.dataset.ehblBlacklisted;
+            const known = blacklistedState === '0' || blacklistedState === '1';
+            const isBlacklisted = blacklistedState === '1';
 
+            // 还没有拿到查询结果（或 API 失败）时不要把它当成“非黑名单”，
+            // 否则“只看黑名单”模式会把整页清空。
             let ehblHide = false;
-            if (mode === 'hide' && isBlacklisted) ehblHide = true;
-            else if (mode === 'only' && !isBlacklisted) ehblHide = true;
+            if (known && mode === 'hide' && isBlacklisted) ehblHide = true;
+            else if (known && mode === 'only' && !isBlacklisted) ehblHide = true;
             row.dataset.ehblHide = ehblHide ? '1' : '0';
 
             const isDownloaded =
@@ -912,11 +941,11 @@
             select.appendChild(opt);
         });
 
-        if (!matched && selectedLabel) {
+        if (!matched && (selectedCode || selectedLabel)) {
             const currentOpt = document.createElement('option');
             currentOpt.value = selectedCode || '__current__';
-            currentOpt.dataset.label = selectedLabel;
-            currentOpt.textContent = selectedLabel + '（当前）';
+            currentOpt.dataset.label = selectedLabel || '';
+            currentOpt.textContent = (selectedLabel || selectedCode) + '（当前）';
             currentOpt.selected = true;
             select.appendChild(currentOpt);
         }
@@ -990,12 +1019,23 @@
                 box.appendChild(inputWrap);
             }
 
+            const onKey = event => {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    closeAndResolve(null);
+                }
+            };
             const closeAndResolve = reason => {
+                document.removeEventListener('keydown', onKey);
                 mask.remove();
                 resolve(reason);
             };
+            document.addEventListener('keydown', onKey);
+            mask.addEventListener('click', event => {
+                if (event.target === mask) closeAndResolve(null);
+            });
 
-            const makeReasonButton = (label, code, extraClass) => {
+            const makeReasonButton = (label, code, extraClass, reasonLabel) => {
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'ehbl-reason-choice' + (extraClass ? ' ' + extraClass : '');
@@ -1004,7 +1044,7 @@
                 btn.addEventListener('click', () => {
                     const result = {
                         reason_code: code || '',
-                        reason_label: label || ''
+                        reason_label: reasonLabel !== undefined ? reasonLabel : (code ? (label || '') : '')
                     };
 
                     if (extraInput) {
@@ -1038,8 +1078,13 @@
                 grid.appendChild(makeReasonButton(label, code, active ? 'ehbl-reason-choice-active' : ''));
             });
 
-            if (!matched && selectedLabel) {
-                grid.appendChild(makeReasonButton(selectedLabel + '（当前）', selectedCode || '', 'ehbl-reason-choice-active'));
+            if (!matched && (selectedLabel || selectedCode)) {
+                grid.appendChild(makeReasonButton(
+                    (selectedLabel || selectedCode) + '（当前）',
+                    selectedCode || '',
+                    'ehbl-reason-choice-active',
+                    selectedLabel || ''
+                ));
             }
 
             box.appendChild(grid);
@@ -1111,16 +1156,21 @@
         actions.id = 'ehbl-panel-actions';
 
         const addKwBtn = createElement('button', 'ehbl-inline-btn', '新增关键词');
-        addKwBtn.addEventListener('click', addKeywordEntry);
+        addKwBtn.addEventListener('click', () => addKeywordEntry());
 
         const addIdBtn = createElement('button', 'ehbl-inline-btn', '新增 ID');
-        addIdBtn.addEventListener('click', addIdEntry);
+        addIdBtn.addEventListener('click', () => addIdEntry());
 
         const addReasonBtn = createElement('button', 'ehbl-inline-btn', '新增常用原因');
         addReasonBtn.addEventListener('click', addReasonEntry);
 
         const refreshBtn = createElement('button', 'ehbl-inline-btn', '刷新列表');
-        refreshBtn.addEventListener('click', () => { renderTable(); refreshCurrentPageMatches(); });
+        refreshBtn.addEventListener('click', () => {
+            cachedReasons = null;
+            invalidateTableCache();
+            renderTable(true);
+            refreshCurrentPageMatches();
+        });
 
         const settingsBtn = createElement('button', 'ehbl-inline-btn', '设置');
         settingsBtn.addEventListener('click', openSettings);
@@ -1128,8 +1178,18 @@
         const exportBtn = createElement('button', 'ehbl-inline-btn', '导出 JSON 到下方');
         exportBtn.addEventListener('click', async () => {
             try {
-                const data = await apiRequest('GET', '/export');
+                const data = await apiRequest('GET', '/export', null, { timeout: 120000 });
                 importTextArea.value = JSON.stringify(data, null, 2);
+            } catch (e) {
+                showApiError(e, '导出失败');
+            }
+        });
+
+        const downloadBtn = createElement('button', 'ehbl-inline-btn', '下载 JSON 文件');
+        downloadBtn.addEventListener('click', async () => {
+            try {
+                const data = await apiRequest('GET', '/export', null, { timeout: 120000 });
+                downloadJSON(data, `eh-blacklist-${new Date().toISOString().slice(0, 10)}.json`);
             } catch (e) {
                 showApiError(e, '导出失败');
             }
@@ -1140,11 +1200,14 @@
             if (!confirm('确定用下面 JSON 覆盖当前服务端黑名单吗?')) return;
             try {
                 const data = JSON.parse(importTextArea.value || '{}');
-                await apiRequest('PUT', '/import?overwrite=true', data);
+                const res = await apiRequest('PUT', '/import?overwrite=true', data, { timeout: 120000 });
                 cachedReasons = null;
-                alert('导入成功');
+                invalidateTableCache();
+                clearSearch();
+                const imported = res || {};
+                alert(`导入成功：条目 ${imported.imported_entries || 0}，原因 ${imported.imported_reasons || 0}，跳过 ${imported.skipped || 0}`);
                 currentPage = 1;
-                await renderTable();
+                await renderTable(true);
                 await refreshCurrentPageMatches();
             } catch (e) {
                 showApiError(e, '导入失败');
@@ -1157,6 +1220,7 @@
         actions.appendChild(refreshBtn);
         actions.appendChild(settingsBtn);
         actions.appendChild(exportBtn);
+        actions.appendChild(downloadBtn);
         actions.appendChild(importBtn);
 
         const tabBar = createElement('div', '');
@@ -1165,9 +1229,9 @@
         tabBtnId = createElement('button', 'ehbl-tab-btn', 'ID');
         tabBtnReason = createElement('button', 'ehbl-tab-btn', '常用原因');
 
-        tabBtnKw.addEventListener('click', () => { activeTab = 'kw'; currentPage = 1; renderTable(); });
-        tabBtnId.addEventListener('click', () => { activeTab = 'id'; currentPage = 1; renderTable(); });
-        tabBtnReason.addEventListener('click', () => { activeTab = 'reason'; currentPage = 1; renderTable(); });
+        tabBtnKw.addEventListener('click', () => switchTab('kw'));
+        tabBtnId.addEventListener('click', () => switchTab('id'));
+        tabBtnReason.addEventListener('click', () => switchTab('reason'));
 
         tabBar.appendChild(tabBtnKw);
         tabBar.appendChild(tabBtnId);
@@ -1180,9 +1244,13 @@
         searchInput.type = 'text';
         searchInput.placeholder = '按当前类型搜索';
         searchInput.addEventListener('input', () => {
-            currentSearchTerm = searchInput.value.trim().toLowerCase();
-            currentPage = 1;
-            renderTable();
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                searchTimer = null;
+                currentSearchTerm = searchInput.value.trim().toLowerCase();
+                currentPage = 1;
+                renderTable();
+            }, 250);
         });
         searchBar.appendChild(searchLabel);
         searchBar.appendChild(searchInput);
@@ -1242,45 +1310,135 @@
             return;
         }
         buildManagerUI();
+        cachedReasons = null;
+        invalidateTableCache();
         currentPage = 1;
+        clearSearch();
         overlayEl.style.display = 'flex';
-        await renderTable();
+        await renderTable(true);
     }
 
-    async function renderTable() {
+    function downloadJSON(data, filename) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function invalidateTableCache(tab) {
+        if (tab) {
+            tableCache[tab] = null;
+            if (tab === 'kw' || tab === 'id') tableCacheTruncated[tab] = false;
+            return;
+        }
+        tableCache.kw = null;
+        tableCache.id = null;
+        tableCache.reason = null;
+        tableCacheTruncated.kw = false;
+        tableCacheTruncated.id = false;
+    }
+
+    function clearSearch() {
+        if (searchTimer) {
+            clearTimeout(searchTimer);
+            searchTimer = null;
+        }
+        currentSearchTerm = '';
+        if (searchInput) searchInput.value = '';
+    }
+
+    function parsePriority(value, fallback) {
+        const n = Number.parseInt(value, 10);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
+    function tableSearchText(obj) {
+        return [
+            obj.type, obj.value, obj.value_norm, obj.reason_code, obj.reason_label, obj.priority,
+            obj.code, obj.label, obj.sort_order,
+            obj.builtin === undefined ? '' : (obj.builtin ? '内置' : '常用')
+        ].filter(v => v !== undefined && v !== null && v !== '').join(' ').toLowerCase();
+    }
+
+    function switchTab(tab) {
+        activeTab = tab;
+        currentPage = 1;
+        clearSearch();
+        renderTable();
+    }
+
+    async function renderTable(force) {
         if (!panelTableBody) return;
+
+        const seq = ++tableRenderSeq;
+        const tab = activeTab;
+        const term = currentSearchTerm;
+
+        if (force) {
+            tableCache[tab] = null;
+            if (tab === 'kw' || tab === 'id') tableCacheTruncated[tab] = false;
+        }
+
         panelTableBody.innerHTML = '';
 
         if (tabBtnKw && tabBtnId && tabBtnReason) {
-            tabBtnKw.classList.toggle('ehbl-tab-btn-active', activeTab === 'kw');
-            tabBtnId.classList.toggle('ehbl-tab-btn-active', activeTab === 'id');
-            tabBtnReason.classList.toggle('ehbl-tab-btn-active', activeTab === 'reason');
+            tabBtnKw.classList.toggle('ehbl-tab-btn-active', tab === 'kw');
+            tabBtnId.classList.toggle('ehbl-tab-btn-active', tab === 'id');
+            tabBtnReason.classList.toggle('ehbl-tab-btn-active', tab === 'reason');
         }
         if (searchInput) {
-            searchInput.placeholder = activeTab === 'kw' ? '搜索关键词 / 原因' : activeTab === 'id' ? '搜索 GID / 原因' : '搜索原因';
+            searchInput.placeholder = tab === 'kw' ? '搜索关键词 / 原因' : tab === 'id' ? '搜索 GID / 原因' : '搜索原因';
         }
 
         try {
             let entries = [];
-            if (activeTab === 'reason') {
-                const reasons = await getReasons(true);
-                entries = reasons.map(r => ({ kind: 'reason', ...r }));
+            let truncated = false;
+
+            if (tab === 'reason') {
+                if (force || !tableCache.reason) {
+                    const reasons = await getReasons(force);
+                    if (seq !== tableRenderSeq || tab !== activeTab) return;
+                    tableCache.reason = reasons.map(r => ({
+                        kind: 'reason',
+                        ...r,
+                        _search: tableSearchText(r)
+                    }));
+                }
+                entries = tableCache.reason;
             } else {
-                await getReasons(false);
-                const type = activeTab === 'kw' ? 'keyword' : 'id';
-                const data = await apiRequest('GET', '/entries' + encodeQuery({ type, limit: API_LIST_LIMIT, offset: 0 }));
-                entries = ((data && data.items) || []).map(e => ({ kind: 'entry', ...e }));
+                if (force || !tableCache[tab]) {
+                    await getReasons(false);
+                    if (seq !== tableRenderSeq || tab !== activeTab) return;
+                    const type = tab === 'kw' ? 'keyword' : 'id';
+                    const data = await apiRequest('GET', '/entries' + encodeQuery({ type, limit: API_LIST_LIMIT, offset: 0 }));
+                    if (seq !== tableRenderSeq || tab !== activeTab) return;
+                    const items = (data && data.items) || [];
+                    tableCacheTruncated[tab] = items.length >= API_LIST_LIMIT;
+                    tableCache[tab] = items.map(e => ({
+                        kind: 'entry',
+                        ...e,
+                        _search: tableSearchText(e)
+                    }));
+                }
+                entries = tableCache[tab];
+                truncated = !!tableCacheTruncated[tab];
             }
 
-            const term = currentSearchTerm;
-            const filtered = entries.filter(e => {
-                if (!term) return true;
-                const text = JSON.stringify(e).toLowerCase();
-                return text.includes(term);
-            });
+            if (seq !== tableRenderSeq || tab !== activeTab) return;
 
-            renderTableEntries(filtered);
+            const filtered = term ? entries.filter(e => e._search.includes(term)) : entries;
+            renderTableEntries(filtered, truncated);
         } catch (e) {
+            if (seq !== tableRenderSeq || tab !== activeTab) return;
+            if (pageInfoSpan) pageInfoSpan.textContent = '';
+            if (prevPageBtn) prevPageBtn.disabled = true;
+            if (nextPageBtn) nextPageBtn.disabled = true;
             const tr = document.createElement('tr');
             const td = document.createElement('td');
             td.colSpan = 5;
@@ -1290,8 +1448,15 @@
         }
     }
 
-    function renderTableEntries(entries) {
-        panelTableBody.innerHTML = '';
+    function renderTableEntries(entries, truncated) {
+        if (truncated) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 5;
+            td.textContent = `仅显示前 ${API_LIST_LIMIT} 条；更多请使用导出或缩小搜索范围。`;
+            tr.appendChild(td);
+            panelTableBody.appendChild(tr);
+        }
 
         if (!entries.length) {
             const tr = document.createElement('tr');
@@ -1300,7 +1465,7 @@
             td.textContent = '当前没有符合条件的项目';
             tr.appendChild(td);
             panelTableBody.appendChild(tr);
-            if (pageInfoSpan) pageInfoSpan.textContent = '第 1 / 1 页, 共 0 项';
+            if (pageInfoSpan) pageInfoSpan.textContent = '第 1 / 1 页, 共 0 项' + (truncated ? `（仅显示前 ${API_LIST_LIMIT} 条）` : '');
             if (prevPageBtn) prevPageBtn.disabled = true;
             if (nextPageBtn) nextPageBtn.disabled = true;
             return;
@@ -1318,7 +1483,7 @@
             else renderEntryRow(e);
         });
 
-        if (pageInfoSpan) pageInfoSpan.textContent = `第 ${currentPage} / ${totalPages} 页, 共 ${entries.length} 项`;
+        if (pageInfoSpan) pageInfoSpan.textContent = `第 ${currentPage} / ${totalPages} 页, 共 ${entries.length} 项` + (truncated ? `（仅显示前 ${API_LIST_LIMIT} 条）` : '');
         if (prevPageBtn) prevPageBtn.disabled = currentPage <= 1;
         if (nextPageBtn) nextPageBtn.disabled = currentPage >= totalPages;
     }
@@ -1361,7 +1526,7 @@
                     value,
                     reason_code: reason.reason_code,
                     reason_label: reason.reason_label,
-                    priority: parseInt(inputPriority.value, 10) || 100
+                    priority: parsePriority(inputPriority.value, 100)
                 });
 
                 // 关键词的 value 改变后，后端会因为 value_norm 改变而新增一条记录。
@@ -1376,8 +1541,9 @@
                     await deleteEntry('keyword', e.value_norm);
                 }
 
+                invalidateTableCache(e.type === 'id' ? 'id' : 'kw');
                 alert('已保存');
-                await renderTable();
+                await renderTable(true);
                 await refreshCurrentPageMatches();
             } catch (err) {
                 showApiError(err, '保存失败');
@@ -1390,7 +1556,8 @@
             if (e.type !== 'id' && !confirm('确定删除该黑名单记录吗？')) return;
             try {
                 await deleteEntry(e.type, e.value_norm);
-                await renderTable();
+                invalidateTableCache(e.type === 'id' ? 'id' : 'kw');
+                await renderTable(true);
                 await refreshCurrentPageMatches();
             } catch (err) {
                 showApiError(err, '删除失败');
@@ -1431,12 +1598,14 @@
             try {
                 await apiRequest('PUT', '/reasons/' + encodeURIComponent(r.code), {
                     label: inputLabel.value.trim(),
-                    sort_order: parseInt(inputSort.value, 10) || 100,
+                    sort_order: parsePriority(inputSort.value, 100),
                     builtin: !!r.builtin
                 });
                 cachedReasons = null;
+                invalidateTableCache();
                 alert('已保存');
-                await renderTable();
+                await renderTable(true);
+                await refreshCurrentPageMatches();
             } catch (err) {
                 showApiError(err, '保存原因失败');
             }
@@ -1449,7 +1618,9 @@
             try {
                 await apiRequest('DELETE', '/reasons/' + encodeURIComponent(r.code));
                 cachedReasons = null;
-                await renderTable();
+                invalidateTableCache();
+                await renderTable(true);
+                await refreshCurrentPageMatches();
             } catch (err) {
                 showApiError(err, '删除原因失败');
             }
@@ -1483,9 +1654,11 @@
                 reason_label: picked.reason_label,
                 priority: 100
             });
+            invalidateTableCache('kw');
+            clearSearch();
             activeTab = 'kw';
             currentPage = 1;
-            await renderTable();
+            await renderTable(true);
             await refreshCurrentPageMatches();
         } catch (e) {
             showApiError(e, '新增关键词失败');
@@ -1506,9 +1679,11 @@
 
         try {
             await upsertEntry({ type: 'id', value, ...reason, priority: 100 });
+            invalidateTableCache('id');
+            clearSearch();
             activeTab = 'id';
             currentPage = 1;
-            await renderTable();
+            await renderTable(true);
             await refreshCurrentPageMatches();
         } catch (e) {
             showApiError(e, '新增 ID 失败');
@@ -1522,9 +1697,12 @@
         if (!label) { alert('原因不能为空'); return; }
         try {
             await createReasonIfNeeded(label);
+            cachedReasons = null;
+            invalidateTableCache();
+            clearSearch();
             activeTab = 'reason';
             currentPage = 1;
-            await renderTable();
+            await renderTable(true);
         } catch (e) {
             showApiError(e, '新增常用原因失败');
         }
@@ -1642,8 +1820,12 @@
 
     async function refreshListMatches() {
         const rows = collectListRows();
-        if (!rows.length) return;
+        if (!rows.length) {
+            listRefreshSeq++;
+            return;
+        }
 
+        const seq = ++listRefreshSeq;
         const items = rows.map(row => ({
             gid: row.dataset.ehblGid,
             title: row.dataset.ehblTitle || ''
@@ -1651,6 +1833,8 @@
 
         try {
             const results = await checkItems(items);
+            if (seq !== listRefreshSeq) return;
+
             latestListResults = new Map();
             results.forEach(result => {
                 latestListResults.set(String(result.gid), result);
@@ -1665,6 +1849,7 @@
             buildFilterBar();
             applyListFilter();
         } catch (e) {
+            if (seq !== listRefreshSeq) return;
             console.error('[EH-BL API] 批量查询失败:', e);
             buildFilterBar();
             applyListFilter();
@@ -1677,7 +1862,6 @@
     }
 
     function handleListPage() {
-        collectListRows();
         buildFilterBar();
         refreshListMatches();
     }
@@ -1685,6 +1869,7 @@
     // ========== 详情页 ==========
 
     async function refreshDetailMatch() {
+        const seq = ++detailRefreshSeq;
         const gid = getCurrentGalleryId();
         if (!gid) return;
 
@@ -1694,6 +1879,7 @@
         const titleText = stripOurBadges(titleEl.textContent);
         try {
             const results = await checkItems([{ gid, title: titleText }]);
+            if (seq !== detailRefreshSeq) return;
             detailResult = results[0] || { gid, blacklisted: false, match: null };
             syncDetailVisual(gid, titleEl, detailResult);
         } catch (e) {
@@ -1769,7 +1955,6 @@
                 }
             } else {
                 await addIdEntry(gid);
-                await refreshDetailMatch();
             }
         });
 
@@ -1786,7 +1971,6 @@
             } else {
                 const titleText = stripOurBadges(titleEl.textContent);
                 await addKeywordEntry(titleText);
-                await refreshDetailMatch();
             }
         });
 
