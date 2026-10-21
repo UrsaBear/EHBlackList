@@ -1,39 +1,47 @@
+@base = http://127.0.0.1:8787
+@token = dev-token
+@contentType = application/json
+
+# 如果服务端没有设置 API_TOKEN，下面的 Authorization 头会被忽略
 ### Health
-GET http://127.0.0.1:8787/health
+GET {{base}}/health
 
 ### Stats
-GET http://127.0.0.1:8787/stats
+GET {{base}}/stats
+Authorization: Bearer {{token}}
 
 ### List reasons
-GET http://127.0.0.1:8787/reasons
+GET {{base}}/reasons
+Authorization: Bearer {{token}}
 
 ### Create ID blacklist entry
-POST http://127.0.0.1:8787/entries
-Content-Type: application/json
+POST {{base}}/entries
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
 
 {
   "type": "id",
   "value": "123456",
   "reason_code": "artist",
-  "reason_label": "不喜欢作者",
   "priority": 100
 }
 
 ### Create keyword blacklist entry
-POST http://127.0.0.1:8787/entries
-Content-Type: application/json
+POST {{base}}/entries
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
 
 {
   "type": "keyword",
   "value": "测试关键词",
   "reason_code": "content",
-  "reason_label": "题材避雷",
   "priority": 100
 }
 
 ### Check batch
-POST http://127.0.0.1:8787/check
-Content-Type: application/json
+POST {{base}}/check
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
 
 {
   "items": [
@@ -43,5 +51,66 @@ Content-Type: application/json
   ]
 }
 
+### List keyword entries
+GET {{base}}/entries?type=keyword&limit=50&offset=0
+Authorization: Bearer {{token}}
+
+### Update entry by path
+PUT {{base}}/entries/keyword/测试关键词
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
+
+{
+  "reason_code": "style",
+  "priority": 50
+}
+
+### Delete entry by value
+DELETE {{base}}/entries?type=keyword&value=测试关键词
+Authorization: Bearer {{token}}
+
+### Create reason
+POST {{base}}/reasons
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
+
+{
+  "code": "custom-a",
+  "label": "自定义原因",
+  "sort_order": 80
+}
+
+### Update reason
+PUT {{base}}/reasons/custom-a
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
+
+{
+  "label": "自定义原因（改名）",
+  "sort_order": 80
+}
+
+### Delete reason
+DELETE {{base}}/reasons/custom-a
+Authorization: Bearer {{token}}
+
 ### Export
-GET http://127.0.0.1:8787/export
+GET {{base}}/export
+Authorization: Bearer {{token}}
+
+### Import v2 export file
+PUT {{base}}/import?overwrite=false
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
+
+< ./blacklist-export.json
+
+### Import legacy userscript format
+PUT {{base}}/import?overwrite=false
+Authorization: Bearer {{token}}
+Content-Type: {{contentType}}
+
+{
+  "ids": ["123456"],
+  "keywords": ["测试关键词"]
+}

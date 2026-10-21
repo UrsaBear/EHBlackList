@@ -1,12 +1,26 @@
 services:
   eh-blacklist:
-    build: .
+    build:
+      context: .
+    image: ursabear/eh-blacklist:latest
     container_name: eh-blacklist
     ports:
       - "8787:8787"
     volumes:
       - ./data:/data
     environment:
-      - ADDR=:8787
-      - DB_PATH=/data/blacklist.db
+      ADDR: ":8787"
+      DB_PATH: /data/blacklist.db
+      # 设置后除 /health 外所有接口都需要 Bearer Token
+      # API_TOKEN: "change-me"
+      # 默认 *；公网部署建议改成具体来源
+      # CORS_ORIGINS: "https://example.com"
+      # 仅在确实位于反向代理之后时开启，否则客户端可伪造 IP
+      # TRUST_PROXY: "false"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3

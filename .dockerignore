@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.gocache
+data
+*.db
+*.db-shm
+*.db-wal
+eh-blacklist-server
+*.exe
+*.test
+README.md
+api.http

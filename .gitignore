@@ -4,3 +4,6 @@
 *.db-wal
 data/*.db*
 eh-blacklist-server
+*.exe
+*.test
+.gocache/
